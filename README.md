@@ -16,7 +16,7 @@ The package targets Lua 5.1, 5.2, 5.3, 5.4 and LuaJIT 2.1. Runtime dependencies 
 - luasec for TLS-verified HTTPS
 - lua-cjson for JSON encoding/decoding
 
-No TLS verification bypass is used.
+HTTPS is fail-closed: LuaSec is configured with CA-chain verification and the SDK verifies DNS/IP identity against subjectAltName (with Common Name fallback only when no DNS SAN exists). The SDK looks for standard Unix CA bundles; custom environments can set SNAPFORGE_CA_FILE or pass ca_file.
 
 ## Hosted quickstart
 
