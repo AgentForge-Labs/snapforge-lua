@@ -1,0 +1,15 @@
+{
+  "name": "snapforge",
+  "version": "0.2.0",
+  "rockRevision": 1,
+  "rockspec": "snapforge-0.2.0-1.rockspec",
+  "luaRocksArtifact": "snapforge 0.2.0-1",
+  "sourceRepository": "https://github.com/AgentForge-Labs/snapforge-lua",
+  "supportedLua": [
+    "5.1",
+    "5.2",
+    "5.3",
+    "5.4",
+    "LuaJIT 2.1"
+  ]
+}
