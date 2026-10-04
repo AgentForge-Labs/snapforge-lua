@@ -162,22 +162,100 @@ local function decode_body(body)
   return parsed
 end
 
+local function readable_file(path)
+  if not path or path == "" then return nil end
+  local file = io.open(path, "rb")
+  if not file then return nil end
+  file:close()
+  return path
+end
+
+local function tls_trust(options)
+  local explicit_file = options.ca_file
+  if explicit_file and explicit_file ~= "" then
+    local file = readable_file(explicit_file)
+    if not file then fail("ca_file is not readable: " .. tostring(explicit_file), 3) end
+    return file
+  end
+
+  local env_ca = readable_file(os.getenv("SNAPFORGE_CA_FILE"))
+  if env_ca then return env_ca end
+
+  local ssl_ca = readable_file(os.getenv("SSL_CERT_FILE"))
+  if ssl_ca then return ssl_ca end
+
+  for _, candidate in ipairs({
+    "/etc/ssl/certs/ca-certificates.crt",
+    "/etc/pki/tls/certs/ca-bundle.crt",
+    "/etc/ssl/ca-bundle.pem",
+    "/etc/ssl/cert.pem",
+  }) do
+    local file = readable_file(candidate)
+    if file then return file end
+  end
+
+  fail("no trusted CA bundle found; set SNAPFORGE_CA_FILE or ca_file", 3)
+end
+
+local function normalize_dns_name(value)
+  local name = tostring(value or ""):lower()
+  name = name:gsub("%.$", "")
+  return name
+end
+
+local function dns_name_matches(host, pattern)
+  host = normalize_dns_name(host)
+  pattern = normalize_dns_name(pattern)
+  if host == "" or pattern == "" or host:find("%z") or pattern:find("%z") then
+    return false
+  end
+  if host == pattern then return true end
+
+  if pattern:sub(1, 2) ~= "*." then return false end
+  if pattern:find("*", 2, true) then return false end
+
+  local suffix = pattern:sub(2)
+  if #host <= #suffix or host:sub(-#suffix) ~= suffix then return false end
+  local left = host:sub(1, #host - #suffix)
+  return left ~= "" and not left:find(".", 1, true)
+end
+
+local function certificate_matches_host(cert, host)
+  if not cert or type(cert.extensions) ~= "function" then return false end
+  host = normalize_dns_name(host)
+  local is_ip = host:match("^%d+%.%d+%.%d+%.%d+$") ~= nil or host:find(":", 1, true) ~= nil
+
+  local extensions = cert:extensions() or {}
+  local san = extensions["2.5.29.17"]
+  if type(san) == "table" then
+    local values = is_ip and san.iPAddress or san.dNSName
+    if type(values) == "table" and #values > 0 then
+      for _, value in ipairs(values) do
+        if is_ip then
+          if normalize_dns_name(value) == host then return true end
+        elseif dns_name_matches(host, value) then
+          return true
+        end
+      end
+      return false
+    end
+  end
+
+  if is_ip or type(cert.subject) ~= "function" then return false end
+  local subject = cert:subject() or {}
+  for _, entry in ipairs(subject) do
+    if type(entry) == "table" and entry.oid == "2.5.4.3" and dns_name_matches(host, entry.value) then
+      return true
+    end
+  end
+  return false
+end
+
 local function default_transport(spec)
   local ok_ltn12, ltn12 = pcall(require, "ltn12")
-  if not ok_ltn12 then fail("SnapForge HTTP support requires LuaSocket", 3) end
-
-  local request_fn
-  local timeout_owner
-  if spec.url:match("^https://") then
-    local ok_https, https = pcall(require, "ssl.https")
-    if not ok_https then fail("HTTPS SnapForge requests require LuaSec", 3) end
-    request_fn = https.request
-    timeout_owner = https
-  else
-    local ok_http, http = pcall(require, "socket.http")
-    if not ok_http then fail("HTTP SnapForge requests require LuaSocket", 3) end
-    request_fn = http.request
-    timeout_owner = http
+  local ok_http, http = pcall(require, "socket.http")
+  if not ok_ltn12 or not ok_http then
+    fail("SnapForge HTTP support requires LuaSocket", 3)
   end
 
   local encoded_body
@@ -202,10 +280,53 @@ local function default_transport(spec)
   }
   if encoded_body then request.source = ltn12.source.string(encoded_body) end
 
-  local old_timeout = timeout_owner.TIMEOUT
-  timeout_owner.TIMEOUT = spec.timeout
-  local call_ok, request_ok, code, response_headers, status_line = pcall(request_fn, request)
-  timeout_owner.TIMEOUT = old_timeout
+  local old_http_timeout = http.TIMEOUT
+  http.TIMEOUT = spec.timeout
+
+  local old_https_timeout
+  if spec.url:match("^https://") then
+    local ok_https, https = pcall(require, "ssl.https")
+    if not ok_https or type(https.tcp) ~= "function" then
+      http.TIMEOUT = old_http_timeout
+      fail("HTTPS SnapForge requests require LuaSec 1.3+", 3)
+    end
+
+    local ca_file = tls_trust(spec)
+    local tls = {
+      protocol = "any",
+      options = {"all", "no_sslv2", "no_sslv3", "no_tlsv1"},
+      verify = "peer",
+    }
+    tls.cafile = ca_file
+
+    local base_create = https.tcp(tls)
+    request.create = function()
+      local connection = base_create()
+      local connect = connection.connect
+      function connection:connect(host, port)
+        local ok, err = connect(self, host, port)
+        if not ok then return ok, err end
+        local cert = self:getpeercertificate()
+        if not certificate_matches_host(cert, host) then
+          pcall(function() self:close() end)
+          return nil, "TLS certificate hostname mismatch for " .. tostring(host)
+        end
+        return ok
+      end
+      return connection
+    end
+
+    old_https_timeout = https.TIMEOUT
+    https.TIMEOUT = spec.timeout
+  end
+
+  local call_ok, request_ok, code, response_headers, status_line = pcall(http.request, request)
+
+  http.TIMEOUT = old_http_timeout
+  if old_https_timeout ~= nil then
+    local _, https = pcall(require, "ssl.https")
+    if https then https.TIMEOUT = old_https_timeout end
+  end
 
   if not call_ok then
     return {
@@ -266,6 +387,7 @@ function snapforge.new(options)
     access_token = access_token,
     url_secret = url_secret,
     timeout = validate_timeout(options.timeout or 60),
+    ca_file = options.ca_file or os.getenv("SNAPFORGE_CA_FILE"),
     transport = options.transport,
   }, Client)
 end
@@ -301,6 +423,7 @@ function Client:_perform(method, url, options)
     headers = headers,
     body = options.body,
     timeout = timeout,
+    ca_file = self.ca_file,
   }
   if self.transport then return normalize_transport_response(self.transport(spec)) end
   return normalize_transport_response(default_transport(spec))
