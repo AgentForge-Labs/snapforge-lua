@@ -1,0 +1,51 @@
+{
+  "apiVersion": "v1",
+  "operations": [
+    {
+      "path": "/api/v1",
+      "method": "get",
+      "operationId": "serviceInfo"
+    },
+    {
+      "path": "/api/v1/screenshot",
+      "method": "post",
+      "operationId": "captureScreenshot"
+    },
+    {
+      "path": "/api/v1/page/context",
+      "method": "post",
+      "operationId": "readCommunityPageContext"
+    },
+    {
+      "path": "/api/screenshots/jobs/{jobId}/download",
+      "method": "get"
+    },
+    {
+      "path": "/api/screenshots/jobs/{jobId}/files/{fileName}",
+      "method": "get"
+    },
+    {
+      "path": "/mcp",
+      "method": "post",
+      "operationId": "mcpJsonRpc"
+    }
+  ],
+  "schemas": {
+    "CaptureRequest": [
+      "url"
+    ],
+    "CaptureResponse": [
+      "ok",
+      "jobId",
+      "files",
+      "failures"
+    ],
+    "PageContextRequest": [
+      "url"
+    ],
+    "PageContextResponse": [
+      "ok",
+      "context"
+    ]
+  }
+}
